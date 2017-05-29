@@ -180,10 +180,6 @@ install(PROGRAMS
 # )
 
 ## Mark other files for installation (e.g. launch and bag files, etc.)
-install(DIRECTORY
-  resource
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
 install(FILES
   plugin.xml
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}

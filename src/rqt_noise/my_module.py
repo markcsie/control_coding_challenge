@@ -1,10 +1,12 @@
-import os
-import rospkg
 import rospy
 
 from qt_gui.plugin import Plugin
-from python_qt_binding import loadUi
+from python_qt_binding.QtWidgets import QVBoxLayout
 from python_qt_binding.QtWidgets import QWidget
+from python_qt_binding.QtWidgets import QPushButton
+from python_qt_binding.QtWidgets import QLineEdit
+from python_qt_binding.QtGui import QDoubleValidator
+
 
 class MyPlugin(Plugin):
 
@@ -12,7 +14,6 @@ class MyPlugin(Plugin):
         super(MyPlugin, self).__init__(context)
         # Give QObjects reasonable names
         self.setObjectName('MyPlugin')
-        rp = rospkg.RosPack()
 
         # Process standalone plugin command-line arguments
         from argparse import ArgumentParser
@@ -28,13 +29,24 @@ class MyPlugin(Plugin):
 
         # Create QWidget
         self._widget = QWidget()
-        # Get path to UI file which is a sibling of this file
-        # in this example the .ui and .py file are in the same folder
-        ui_file = os.path.join(rp.get_path('control_coding_challenge'), 'resource', 'MyPlugin.ui')
-        # Extend the widget with all attributes and children from UI file
-        loadUi(ui_file, self._widget)
+        self._layout = QVBoxLayout()
+        self._widget.setLayout(self._layout)
+
+        self._update_button = QPushButton('Update Parameters')
+        self._layout.addWidget(self._update_button)
+        self._update_button.clicked.connect(self.on_click)
+
+        self._r_edit = QLineEdit()
+        self._r_edit.setValidator(QDoubleValidator())
+        self._layout.addWidget(self._r_edit)
+
+        self._q_edit = QLineEdit()
+        self._q_edit.setValidator(QDoubleValidator())
+        self._layout.addWidget(self._q_edit)
+
         # Give QObjects reasonable names
         self._widget.setObjectName('MyPluginUi')
+
         # Show _widget.windowTitle on left-top of each plugin (when 
         # it's set in _widget). This is useful when you open multiple 
         # plugins at once. Also if you open multiple instances of your 
@@ -44,6 +56,9 @@ class MyPlugin(Plugin):
             self._widget.setWindowTitle(self._widget.windowTitle() + (' (%d)' % context.serial_number()))
         # Add widget to the user interface
         context.add_widget(self._widget)
+
+    def on_click(self):
+        print 'Hello World'
 
     def shutdown_plugin(self):
         # TODO unregister all publishers here

@@ -2,9 +2,9 @@
 
 import sys
 
-from control_coding_challenge.my_module import MyPlugin
+from rqt_noise.my_module import MyPlugin
 from rqt_gui.main import Main
 
-plugin = 'control_coding_challenge'
+plugin = 'rqt_noise'
 main = Main(filename=plugin)
 sys.exit(main.main(standalone=plugin))
