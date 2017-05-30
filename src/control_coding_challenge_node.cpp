@@ -53,10 +53,12 @@ void SensorFusion::imuCallback(const sensor_msgs::Imu &msg)
 {
   // cache imu messages for later use
   imu_queue_.push(msg);
+  std::cout << "imu frame_id " << msg.header.frame_id << std::endl;
 }
 
 void SensorFusion::groundRangeCallback(const sensor_msgs::Range &msg)
 {
+  std::cout << "range frame_id " << msg.header.frame_id << std::endl;
   if (!initialized_)
   {
     prev_stamp_ = msg.header.stamp;
