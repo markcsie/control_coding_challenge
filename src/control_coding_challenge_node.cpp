@@ -3,8 +3,11 @@
 #include <message_filters/time_synchronizer.h>
 #include <sensor_msgs/Range.h>
 #include <sensor_msgs/Imu.h>
+#include <std_msgs/Float64.h>
 
+#include <Eigen/Dense>
 #include <queue>
+
 
 class SensorFusion
 {
@@ -16,9 +19,23 @@ public:
   ros::Publisher dataPublisher;
   void groundRangeCallback(const sensor_msgs::Range &msg);
   void imuCallback(const sensor_msgs::Imu &msg);
+  void rNoiseCallback(const std_msgs::Float64 &msg);
+  void qNoiseCallback(const std_msgs::Float64 &msg);
   void callback(const sensor_msgs::RangeConstPtr &ground_msg, const sensor_msgs::ImuConstPtr &imu_msg);
 
 protected:
+  enum StateMembers // state with respect to the global frame
+  {
+    StateX,
+    StateY,
+    StateZ,
+    StateVx,
+    StateVy,
+    StateVz,
+    StateRoll,
+    StatePitch,
+    StateYaw,
+  };
   bool initialized_;
   ros::Time prev_stamp_;
   double r_;
@@ -27,6 +44,13 @@ protected:
   double filtered_z_;
   double variance_z_;
   std::queue<sensor_msgs::Imu> imu_queue_;
+
+  Eigen::MatrixXd imu_covariance_r_;
+  Eigen::MatrixXd range_variance_q_;
+  Eigen::MatrixXd covariance_sigma_; // state covariance
+  Eigen::VectorXd ekfPredict(const Eigen::VectorXd &x, const Eigen::VectorXd &u, const double &delta_t);
+  Eigen::VectorXd ekfCorrect(const Eigen::VectorXd &x, const double &z);
+
 };
 
 SensorFusion::SensorFusion(const double &r, const double &q) : initialized_(false), r_(r), q_(q)
@@ -49,11 +73,83 @@ SensorFusion::~SensorFusion()
 //  //  std::cout << "ground " << ground_msg->range << std::endl;
 //}
 
+Eigen::VectorXd SensorFusion::ekfPredict(const Eigen::VectorXd &x, const Eigen::VectorXd &u, const double &delta_t)
+{
+  double roll = x(StateRoll);
+  double pitch = x(StatePitch);
+  double yaw = x(StateYaw);
+
+  double sp = std::sin(pitch);
+  double cp = std::cos(pitch);
+
+  double sr = std::sin(roll);
+  double cr = std::cos(roll);
+
+  double sy = std::sin(yaw);
+  double cy = std::cos(yaw);
+  Eigen::MatrixXd rotation_matrix(3, 3);
+  rotation_matrix(0, 0) = cy * cp;
+  rotation_matrix(0, 1) = cy * sp * sr - sy * cr;
+  rotation_matrix(0, 2) = cy * sp * cr + sy * sr;
+
+  rotation_matrix(1, 0) = sy * cp;
+  rotation_matrix(1, 1) = sy * sp * sr + cy * cr;
+  rotation_matrix(1, 2) = sy * sp * cr - cy * sr;
+
+  rotation_matrix(2, 0) = -sp;
+  rotation_matrix(2, 1) = cp * sr;
+  rotation_matrix(2, 2) = cp * cr;
+
+  Eigen::VectorXd x_predict = x;
+  // position
+  x_predict.head(3) += u.segment(6, 3) * delta_t;
+  // linear velocity
+  Eigen::VectorXd a = u.segment(3, 3);
+  x_predict.segment(3, 3) += rotation_matrix * 0.5 * a * delta_t * delta_t;
+  // orientation, directly accquired from imu messages
+  x_predict.segment(6, 3) = u.head(3);
+
+
+  Eigen::MatrixXd jacobian_g;
+  covariance_sigma_ = jacobian_g * covariance_sigma_ * jacobian_g.transpose() + imu_covariance_r_;
+
+  return x_predict;
+}
+
+Eigen::VectorXd SensorFusion::ekfCorrect(const Eigen::VectorXd &x, const double &z)
+{
+  Eigen::MatrixXd jacobian_h;
+  Eigen::MatrixXd kalman_gain = covariance_sigma_ * jacobian_h.transpose()*(jacobian_h * covariance_sigma_ * jacobian_h.transpose() + range_variance_q_).inverse();
+
+  Eigen::VectorXd x_correct = x;
+  double z_predict;
+  x_correct += kalman_gain * (z - z_predict);
+  covariance_sigma_ = (Eigen::MatrixXd::Identity(kalman_gain.rows(), kalman_gain.rows()) - kalman_gain * jacobian_h) * covariance_sigma_;
+
+  return x_correct;
+}
+
+
 void SensorFusion::imuCallback(const sensor_msgs::Imu &msg)
 {
   // cache imu messages for later use
   imu_queue_.push(msg);
-  std::cout << "imu frame_id " << msg.header.frame_id << std::endl;
+  std::cout << "msg.orientation " << msg.orientation << std::endl;
+  std::cout << "msg.orientation_covariance[0] " << msg.orientation_covariance[0] << std::endl;
+  std::cout << "msg.orientation_covariance[1] " << msg.orientation_covariance[1] << std::endl;
+
+}
+
+void SensorFusion::rNoiseCallback(const std_msgs::Float64 &msg)
+{
+  r_ = msg.data;
+  std::cout << "r_ updated " << r_ << std::endl;
+}
+
+void SensorFusion::qNoiseCallback(const std_msgs::Float64 &msg)
+{
+  q_ = msg.data;
+  std::cout << "q_ updated " << q_ << std::endl;
 }
 
 void SensorFusion::groundRangeCallback(const sensor_msgs::Range &msg)
@@ -116,6 +212,10 @@ int main(int argc, char **argv)
 
   ros::Subscriber imu_sub = node.subscribe("/ifm_sys/imu/data", 100, &SensorFusion::imuCallback, &sensor_fusion);
   ros::Subscriber ground_sub = node.subscribe("/ifm_sys/distance/ground", 100, &SensorFusion::groundRangeCallback, &sensor_fusion);
+
+  ros::Subscriber r_noise_sub = node.subscribe("/ifm_sys/sensor_fusion/r_noise", 100, &SensorFusion::rNoiseCallback, &sensor_fusion);
+  ros::Subscriber q_noise_sub = node.subscribe("/ifm_sys/sensor_fusion/q_noise", 100, &SensorFusion::qNoiseCallback, &sensor_fusion);
+
 
   ros::spin();
 
