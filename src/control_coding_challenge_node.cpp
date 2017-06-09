@@ -1,221 +1,162 @@
-#include <ros/ros.h>
-#include <message_filters/subscriber.h>
-#include <message_filters/time_synchronizer.h>
-#include <sensor_msgs/Range.h>
-#include <sensor_msgs/Imu.h>
-#include <std_msgs/Float64.h>
-
-#include <Eigen/Dense>
 #include <queue>
 
+#include <ros/ros.h>
+#include <sensor_msgs/Range.h>
+#include <sensor_msgs/Imu.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
 
-class SensorFusion
+#include "sensor_fusion.h"
+#include "control_coding_challenge/NoiseMatrix.h"
+
+class ControlCodingChallenge
 {
 public:
-  SensorFusion(const double &r, const double &q);
-  SensorFusion(const SensorFusion& other);
-  virtual ~SensorFusion();
+  ControlCodingChallenge(SensorFusion &sensor_fusion);
+  virtual ~ControlCodingChallenge();
 
-  ros::Publisher dataPublisher;
   void groundRangeCallback(const sensor_msgs::Range &msg);
   void imuCallback(const sensor_msgs::Imu &msg);
-  void rNoiseCallback(const std_msgs::Float64 &msg);
-  void qNoiseCallback(const std_msgs::Float64 &msg);
+  void rNoiseCallback(const control_coding_challenge::NoiseMatrix &msg);
+  void qNoiseCallback(const control_coding_challenge::NoiseMatrix &msg);
   void callback(const sensor_msgs::RangeConstPtr &ground_msg, const sensor_msgs::ImuConstPtr &imu_msg);
 
 protected:
-  enum StateMembers // state with respect to the global frame
-  {
-    StateX,
-    StateY,
-    StateZ,
-    StateVx,
-    StateVy,
-    StateVz,
-    StateRoll,
-    StatePitch,
-    StateYaw,
-  };
-  bool initialized_;
+  bool time_initialized_;
+  SensorFusion &sensor_fusion_;
   ros::Time prev_stamp_;
-  double r_;
-  double q_;
-  double prev_linear_acceleration_z_;
-  double filtered_z_;
-  double variance_z_;
+  Eigen::VectorXd u_;
   std::queue<sensor_msgs::Imu> imu_queue_;
-
-  Eigen::MatrixXd imu_covariance_r_;
-  Eigen::MatrixXd range_variance_q_;
-  Eigen::MatrixXd covariance_sigma_; // state covariance
-  Eigen::VectorXd ekfPredict(const Eigen::VectorXd &x, const Eigen::VectorXd &u, const double &delta_t);
-  Eigen::VectorXd ekfCorrect(const Eigen::VectorXd &x, const double &z);
-
 };
 
-SensorFusion::SensorFusion(const double &r, const double &q) : initialized_(false), r_(r), q_(q)
+ControlCodingChallenge::ControlCodingChallenge(SensorFusion &sensor_fusion) : sensor_fusion_(sensor_fusion), time_initialized_(false)
 {
 }
 
-SensorFusion::SensorFusion(const SensorFusion& other)
+ControlCodingChallenge::~ControlCodingChallenge()
 {
 }
 
-SensorFusion::~SensorFusion()
+void ControlCodingChallenge::rNoiseCallback(const control_coding_challenge::NoiseMatrix &msg)
 {
+  if (msg.matrix.size() != SensorFusion::StateDim * SensorFusion::StateDim)
+  {
+    std::cerr << "wrong message for rNoise" << std::endl;
+    return;
+  }
+
+  Eigen::MatrixXd r_noise = Eigen::MatrixXd::Zero(SensorFusion::StateDim, SensorFusion::StateDim);
+  for (size_t row = 0; row < SensorFusion::StateDim; row++)
+  {
+    for (size_t col = 0; col < SensorFusion::StateDim; col++)
+    {
+      r_noise(row, col) = msg.matrix[row * SensorFusion::StateDim + col];
+    }
+  }
+
+  sensor_fusion_.setStateNoiseR(r_noise);
 }
 
-//void SensorFusion::callback(const sensor_msgs::RangeConstPtr &ground_msg, const sensor_msgs::ImuConstPtr &imu_msg)
-//{
-//  //  std::cout << "ground " << ground_msg->header.stamp << std::endl;
-//  //  std::cout << "imu " << imu_msg->header.stamp << std::endl;
-
-//  //  std::cout << "ground " << ground_msg->range << std::endl;
-//}
-
-Eigen::VectorXd SensorFusion::ekfPredict(const Eigen::VectorXd &x, const Eigen::VectorXd &u, const double &delta_t)
+void ControlCodingChallenge::qNoiseCallback(const control_coding_challenge::NoiseMatrix &msg)
 {
-  double roll = x(StateRoll);
-  double pitch = x(StatePitch);
-  double yaw = x(StateYaw);
+  if (msg.matrix.size() != SensorFusion::MeasurementDim * SensorFusion::MeasurementDim)
+  {
+    std::cerr << "wrong message for qNoise" << std::endl;
+    return;
+  }
 
-  double sp = std::sin(pitch);
-  double cp = std::cos(pitch);
-
-  double sr = std::sin(roll);
-  double cr = std::cos(roll);
-
-  double sy = std::sin(yaw);
-  double cy = std::cos(yaw);
-  Eigen::MatrixXd rotation_matrix(3, 3);
-  rotation_matrix(0, 0) = cy * cp;
-  rotation_matrix(0, 1) = cy * sp * sr - sy * cr;
-  rotation_matrix(0, 2) = cy * sp * cr + sy * sr;
-
-  rotation_matrix(1, 0) = sy * cp;
-  rotation_matrix(1, 1) = sy * sp * sr + cy * cr;
-  rotation_matrix(1, 2) = sy * sp * cr - cy * sr;
-
-  rotation_matrix(2, 0) = -sp;
-  rotation_matrix(2, 1) = cp * sr;
-  rotation_matrix(2, 2) = cp * cr;
-
-  Eigen::VectorXd x_predict = x;
-  // position
-  x_predict.head(3) += u.segment(6, 3) * delta_t;
-  // linear velocity
-  Eigen::VectorXd a = u.segment(3, 3);
-  x_predict.segment(3, 3) += rotation_matrix * 0.5 * a * delta_t * delta_t;
-  // orientation, directly accquired from imu messages
-  x_predict.segment(6, 3) = u.head(3);
-
-
-  Eigen::MatrixXd jacobian_g;
-  covariance_sigma_ = jacobian_g * covariance_sigma_ * jacobian_g.transpose() + imu_covariance_r_;
-
-  return x_predict;
+  Eigen::MatrixXd q_noise = Eigen::MatrixXd::Zero(SensorFusion::MeasurementDim, SensorFusion::MeasurementDim);
+  for (size_t row = 0; row < SensorFusion::MeasurementDim; row++)
+  {
+    for (size_t col = 0; col < SensorFusion::MeasurementDim; col++)
+    {
+      q_noise(row, col) = msg.matrix[row * SensorFusion::MeasurementDim + col];
+    }
+  }
+  sensor_fusion_.setRangeNoiseQ(q_noise);
 }
 
-Eigen::VectorXd SensorFusion::ekfCorrect(const Eigen::VectorXd &x, const double &z)
-{
-  Eigen::MatrixXd jacobian_h;
-  Eigen::MatrixXd kalman_gain = covariance_sigma_ * jacobian_h.transpose()*(jacobian_h * covariance_sigma_ * jacobian_h.transpose() + range_variance_q_).inverse();
-
-  Eigen::VectorXd x_correct = x;
-  double z_predict;
-  x_correct += kalman_gain * (z - z_predict);
-  covariance_sigma_ = (Eigen::MatrixXd::Identity(kalman_gain.rows(), kalman_gain.rows()) - kalman_gain * jacobian_h) * covariance_sigma_;
-
-  return x_correct;
-}
-
-
-void SensorFusion::imuCallback(const sensor_msgs::Imu &msg)
+void ControlCodingChallenge::imuCallback(const sensor_msgs::Imu &msg)
 {
   // cache imu messages for later use
   imu_queue_.push(msg);
-  std::cout << "msg.orientation " << msg.orientation << std::endl;
-  std::cout << "msg.orientation_covariance[0] " << msg.orientation_covariance[0] << std::endl;
-  std::cout << "msg.orientation_covariance[1] " << msg.orientation_covariance[1] << std::endl;
-
 }
 
-void SensorFusion::rNoiseCallback(const std_msgs::Float64 &msg)
+void ControlCodingChallenge::groundRangeCallback(const sensor_msgs::Range &range_msg)
 {
-  r_ = msg.data;
-  std::cout << "r_ updated " << r_ << std::endl;
-}
-
-void SensorFusion::qNoiseCallback(const std_msgs::Float64 &msg)
-{
-  q_ = msg.data;
-  std::cout << "q_ updated " << q_ << std::endl;
-}
-
-void SensorFusion::groundRangeCallback(const sensor_msgs::Range &msg)
-{
-  std::cout << "range frame_id " << msg.header.frame_id << std::endl;
-  if (!initialized_)
+  if (!time_initialized_)
   {
-    prev_stamp_ = msg.header.stamp;
-    filtered_z_ = msg.range;
-    variance_z_ = 1;
-    initialized_ = true;
-    prev_linear_acceleration_z_ = 0; // assumption
+    prev_stamp_ = range_msg.header.stamp;
+    u_ = Eigen::VectorXd::Zero(SensorFusion::ControlDim);
+    time_initialized_ = true;
   }
   else
   {
     // motion update
-    while (!imu_queue_.empty() && imu_queue_.front().header.stamp < msg.header.stamp)
+    while (!imu_queue_.empty() && imu_queue_.front().header.stamp <= range_msg.header.stamp)
     {
-      std::cout << "imu prev_stamp_ " << prev_stamp_ << std::endl;
-      std::cout << "imu prev_linear_acceleration_z_.z " << prev_linear_acceleration_z_ << std::endl;
+      ros::Duration delta_t = imu_queue_.front().header.stamp - prev_stamp_;
 
-      // for those imu messages received before initilization, discard them
-      if (imu_queue_.front().header.stamp >= prev_stamp_)
-      {
-        ros::Duration delta_t = imu_queue_.front().header.stamp - prev_stamp_;
-//        std::cout <<  "delta_t.toSec() " << delta_t.toSec() << std::endl;
+      // NOTE: The orientation of x_t is from u_t not u_{t-1}
+      double roll;
+      double pitch;
+      double yaw;
+      tf2::Quaternion q(imu_queue_.front().orientation.x, imu_queue_.front().orientation.y, imu_queue_.front().orientation.z, imu_queue_.front().orientation.w);
+      tf2::Matrix3x3 mat(q);
+      mat.getEulerYPR(yaw, pitch, roll);
+      u_(SensorFusion::ControlRoll) = roll;
+      u_(SensorFusion::ControlPitch) = pitch;
+      u_(SensorFusion::ControlYaw) = yaw;
 
-        filtered_z_ = filtered_z_ + std::pow(delta_t.toSec(), 2) * prev_linear_acceleration_z_ / 2;
-        variance_z_ = variance_z_ + r_;
+      sensor_fusion_.ekfPredict(u_, delta_t.toSec());
 
-        prev_linear_acceleration_z_ = imu_queue_.front().linear_acceleration.z;
-        prev_stamp_ = imu_queue_.front().header.stamp;
-      }
+      // NOTE: The velocity of x_t is calculated from a_{t-1} not a_t
+      u_(SensorFusion::ControlAx) = imu_queue_.front().linear_acceleration.x;
+      u_(SensorFusion::ControlAy) = imu_queue_.front().linear_acceleration.y;
+      u_(SensorFusion::ControlAz) = imu_queue_.front().linear_acceleration.z;
+
+      prev_stamp_ = imu_queue_.front().header.stamp;
 
       imu_queue_.pop();
     }
+    // Predict again to sychronize the time
+    ros::Duration delta_t = range_msg.header.stamp - prev_stamp_;
+    if (!delta_t.isZero())
+    {
+      sensor_fusion_.ekfPredict(u_, delta_t.toSec());
+    }
 
     // measurement update
-    double kalman_gain = variance_z_ / (variance_z_ + q_);
-    filtered_z_ = filtered_z_ + kalman_gain * (msg.range - filtered_z_);
-    variance_z_ = (1 - kalman_gain) * variance_z_;
+    sensor_fusion_.ekfCorrect(range_msg.range);
   }
 
-  std::cout << "time " << msg.header.stamp << std::endl;
-  std::cout << "ground " << msg.range << std::endl;
-  std::cout << "filtered_z_ " << filtered_z_ << std::endl;
+  std::cout << "range from sensor " << range_msg.range << std::endl;
+  std::cout << "filtered_height_ " << (sensor_fusion_.getX())(SensorFusion::StateZ) << std::endl;
 }
+
+
 
 int main(int argc, char **argv)
 {
+  SensorFusion sensor_fusion;
+  // initial state??
+  Eigen::VectorXd initial_x = Eigen::VectorXd::Zero(SensorFusion::StateDim);
+  // initial covariance??
+  Eigen::MatrixXd initial_covariance = Eigen::MatrixXd::Identity(initial_x.rows(), initial_x.rows());
+  // parameters
+  Eigen::MatrixXd initial_state_noise_r_ = Eigen::MatrixXd::Identity(initial_x.rows(), initial_x.rows());
+  Eigen::MatrixXd initial_range_noise_q_ = Eigen::MatrixXd::Identity(SensorFusion::MeasurementDim, SensorFusion::MeasurementDim);
+  sensor_fusion.initialize(initial_x, initial_covariance, initial_state_noise_r_, initial_range_noise_q_);
+
+  ControlCodingChallenge control(sensor_fusion);
+
   ros::init(argc, argv, "control_coding_challenge");
   ros::NodeHandle node;
+  ros::Subscriber imu_sub = node.subscribe("/ifm_sys/imu/data", 100, &ControlCodingChallenge::imuCallback, &control);
+  ros::Subscriber ground_sub = node.subscribe("/ifm_sys/distance/ground", 100, &ControlCodingChallenge::groundRangeCallback, &control);
 
-  SensorFusion sensor_fusion(1, 1);
-
-  //  message_filters::Subscriber<sensor_msgs::Range> ground_sub(node, "/ifm_sys/distance/ground", 1);
-  //  message_filters::Subscriber<sensor_msgs::Imu> imu_sub(node, "/ifm_sys/imu/data", 1);
-  //  message_filters::TimeSynchronizer<sensor_msgs::Range, sensor_msgs::Imu> sync(ground_sub, imu_sub, 10);
-  //  sync.registerCallback(boost::bind(&SensorFusion::callback, &sensor_fusion, _1, _2));
-
-  ros::Subscriber imu_sub = node.subscribe("/ifm_sys/imu/data", 100, &SensorFusion::imuCallback, &sensor_fusion);
-  ros::Subscriber ground_sub = node.subscribe("/ifm_sys/distance/ground", 100, &SensorFusion::groundRangeCallback, &sensor_fusion);
-
-  ros::Subscriber r_noise_sub = node.subscribe("/ifm_sys/sensor_fusion/r_noise", 100, &SensorFusion::rNoiseCallback, &sensor_fusion);
-  ros::Subscriber q_noise_sub = node.subscribe("/ifm_sys/sensor_fusion/q_noise", 100, &SensorFusion::qNoiseCallback, &sensor_fusion);
-
+  ros::Subscriber r_noise_sub = node.subscribe("/ifm_sys/sensor_fusion/r_noise", 100, &ControlCodingChallenge::rNoiseCallback, &control);
+  ros::Subscriber q_noise_sub = node.subscribe("/ifm_sys/sensor_fusion/q_noise", 100, &ControlCodingChallenge::qNoiseCallback, &control);
 
   ros::spin();
 
